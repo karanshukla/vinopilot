@@ -22,7 +22,8 @@ Usage: vinopilot [--source-root DIR] [--json] <command>
 Commands:
   list                       what's installed, and how (offline)
   check                      list, plus the newest version of each (online)
-  install <app> [--via WAY]  WAY: release (default), source, pypi or crates
+  install <app> [--via WAY]  WAY: release (default), source, pypi, crates or
+                             flatpak (vinowhisper, vinosearch)
   update <app>... | --all    update in the way each is installed
   uninstall <app> [--yes]
   steps <app> <install|update|uninstall> [--via WAY]
@@ -73,10 +74,9 @@ fn parse_args(raw: impl Iterator<Item = String>) -> Result<Args, String> {
             "--all" => args.all = true,
             "--via" => {
                 let v = value("--via")?;
-                args.via =
-                    Some(Channel::parse(&v).ok_or_else(|| {
-                        format!("--via {v}: use release, source, pypi or crates")
-                    })?);
+                args.via = Some(Channel::parse(&v).ok_or_else(|| {
+                    format!("--via {v}: use release, source, pypi, crates or flatpak")
+                })?);
             }
             "--source-root" => args.source_root = Some(PathBuf::from(value("--source-root")?)),
             "-h" | "--help" => args.rest.insert(0, "help".into()),

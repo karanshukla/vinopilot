@@ -90,6 +90,17 @@ impl Id {
         }
     }
 
+    /// The app id of its Flatpak, for the components whose release has one
+    /// (`<slug>-x86_64.flatpak`, as vinoPilot's own).
+    pub fn flatpak(self) -> Option<&'static str> {
+        match self {
+            Id::App(App::Pilot) => Some(PILOT_APP_ID),
+            Id::App(App::Whisper) => Some("io.github.karanshukla.vinowhisper"),
+            Id::App(App::Search) => Some("io.github.karanshukla.vinosearch"),
+            _ => None,
+        }
+    }
+
     /// Installs under /usr/local and /etc, so every step runs through pkexec.
     pub fn needs_root(self) -> bool {
         self == Id::App(App::AuthFace)
@@ -112,6 +123,10 @@ impl Id {
         all.push(Channel::Source);
         if matches!(self.package(), Some(Package::PyPi(_) | Package::Crate(_))) {
             all.push(Channel::Package);
+        }
+        // vinoPilot's own Flatpak is found, not offered: see `Channel::Deb`.
+        if self.flatpak().is_some() && self != Id::App(App::Pilot) {
+            all.push(Channel::Flatpak);
         }
         all
     }
@@ -142,18 +157,19 @@ pub enum Channel {
     Source,
     /// PyPI through `uv tool`, or crates.io through `cargo install`.
     Package,
-    /// vinoPilot's own release as a `.deb`, system-wide. Like the next two,
+    /// vinoPilot's own release as a `.deb`, system-wide. Like the `.rpm`,
     /// only vinoPilot is found this way, and no `channels()` offers it.
     Deb,
     /// The same as an `.rpm`.
     Rpm,
-    /// The same as a Flatpak bundle, for the user or system-wide.
+    /// The release's Flatpak bundle, for the user or system-wide: vinoPilot's
+    /// own (found, not offered), and the apps that have one ([`Id::flatpak`]).
     Flatpak,
 }
 
 impl Channel {
-    /// `release`, `source`, or `package` (also `pypi`, `crates`); `deb`,
-    /// `rpm` and `flatpak` for vinoPilot itself.
+    /// `release`, `source`, `package` (also `pypi`, `crates`) or `flatpak`;
+    /// `deb` and `rpm` for vinoPilot itself.
     pub fn parse(text: &str) -> Option<Channel> {
         match text.to_lowercase().as_str() {
             "release" | "binary" => Some(Channel::Release),
@@ -468,20 +484,26 @@ install -Dm755 "$tmp/ovfetch-x86_64-linux" "$BIN/ovfetch"
 /// vinoPilot's Flatpak, and the menu entry's name.
 pub const PILOT_APP_ID: &str = "io.github.karanshukla.vinopilot";
 
-/// Before vinoPilot's own package steps: `fetch ASSET` downloads that file
-/// of the release into `$tmp` and checks it against the release's
-/// SHA256SUMS, as install.sh does the tarball. `as_root` is pkexec for the
-/// one command that installs it; the download and the check stay the user's.
-const PILOT_PACKAGE: &str = r#"tmp="$(mktemp -d)"
+/// Before a package step: `fetch ASSET` downloads that file of the release
+/// into `$tmp` and checks it against the release's SHA256SUMS, as install.sh
+/// does the tarball, or against its own `ASSET.sha256` in a release without
+/// one (vinoSearch's). `as_root` is pkexec for the one command that installs
+/// a system package; the download and the check stay the user's.
+/// `flatpak_scope` is where `$APP_ID` is installed, and the user's
+/// installation for a first install: no password, like the other ways in.
+const PACKAGE: &str = r#"tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 fetch() {
-    local f
-    for f in SHA256SUMS "$1"; do
-        curl -fsSL --retry 3 --connect-timeout 20 -o "$tmp/$f" "$RELEASE/$f"
-    done
+    local code=0
+    curl -fsSL --retry 3 --connect-timeout 20 -o "$tmp/$1" "$RELEASE/$1" || code=$?
+    [ "$code" -ne 22 ] || { echo "✗ The latest release has no $1" >&2; exit 1; }
+    [ "$code" -eq 0 ] || { echo "✗ Couldn't download $1" >&2; exit 1; }
+    curl -fsSL --retry 3 --connect-timeout 20 -o "$tmp/SHA256SUMS" "$RELEASE/SHA256SUMS" 2>/dev/null \
+        || curl -fsSL --retry 3 --connect-timeout 20 -o "$tmp/SHA256SUMS" "$RELEASE/$1.sha256" \
+        || { echo "✗ The release has no checksum for $1. Nothing was installed." >&2; exit 1; }
     (cd "$tmp" && awk -v f="$1" '$2 == f || $2 == "*" f { print $1 "  " f }' SHA256SUMS > want \
         && [ "$(wc -l < want)" -eq 1 ] && sha256sum -c --strict --quiet want) \
-        || { echo "✗ $1 doesn't match SHA256SUMS. Nothing was installed." >&2; exit 1; }
+        || { echo "✗ $1 doesn't match its checksum. Nothing was installed." >&2; exit 1; }
     echo "checksum verified"
     # The package manager may read it as another user.
     chmod 755 "$tmp"; chmod 644 "$tmp/$1"
@@ -493,7 +515,10 @@ as_root() {
     pkexec "$@"
 }
 flatpak_scope() {
-    if flatpak info --user io.github.karanshukla.vinopilot >/dev/null 2>&1; then echo --user; else echo --system; fi
+    if flatpak info --user "$APP_ID" >/dev/null 2>&1; then echo --user
+    elif flatpak info --system "$APP_ID" >/dev/null 2>&1; then echo --system
+    else echo --user
+    fi
 }
 "#;
 
@@ -521,9 +546,9 @@ fi"#;
 /// for a password, and a system-wide bundle install always needs one
 /// (`install-bundle` is `auth_admin`, and Flatpak's rule for the admin group
 /// doesn't cover it), so it failed with "not allowed for user".
-const PILOT_FLATPAK: &str = r#"need flatpak "it's what this vinoPilot was installed with"
-fetch vinopilot-x86_64.flatpak
-if out="$(LC_ALL=C flatpak install "$(flatpak_scope)" -y "$tmp/vinopilot-x86_64.flatpak" 2>&1)"; then
+const FLATPAK_INSTALL: &str = r#"need flatpak "install it from https://flatpak.org/setup, then try again"
+fetch "$ASSET"
+if out="$(LC_ALL=C flatpak install "$(flatpak_scope)" -y "$tmp/$ASSET" 2>&1)"; then
     echo "$out"
 else
     echo "$out"
@@ -533,10 +558,31 @@ else
     esac
 fi"#;
 
+/// Leaves `~/.var/app/$APP_ID` alone: what the app keeps there is the
+/// user's to delete.
+const FLATPAK_UNINSTALL: &str = r#"need flatpak "it's what this was installed with"
+flatpak uninstall "$(flatpak_scope)" -y "$APP_ID""#;
+
+/// A Flatpak step: the package prelude, with `$APP_ID` and `$ASSET` (the
+/// bundle's name in the release) set for `body`.
+fn flatpak_step(id: Id, app_id: &str, body: &str) -> Step {
+    Step::user(&format!(
+        "{PACKAGE}APP_ID={app_id}\nASSET={}-x86_64.flatpak\n{body}",
+        id.slug()
+    ))
+}
+
 /// What uninstalling `id` installed through `channel` removes and what it
 /// keeps, in a sentence or two for the confirmation. Each app's own
 /// uninstaller deletes its downloaded models and keeps the user's data.
 pub fn uninstall_note(id: Id, channel: Channel) -> String {
+    if let (Channel::Flatpak, Some(app_id)) = (channel, id.flatpak())
+        && id != Id::App(App::Pilot)
+    {
+        return format!(
+            "Removes the app. Its downloaded models, your data and settings stay in ~/.var/app/{app_id}."
+        );
+    }
     let what = match id {
         Id::App(App::Pilot) => "Removes this app. The apps it installed stay.",
         Id::App(App::Watch) => "Removes the app.",
@@ -583,6 +629,15 @@ fn app_steps(id: Id, channel: Channel, action: Action) -> Vec<Step> {
     use Channel::*;
     let s = Step::user;
     let r = Step::root;
+    // A release's Flatpak bundle: checked, then installed over the old one.
+    // Before the apps' own arms, whose `_` uninstalls are for the home.
+    if let (Flatpak, Some(app_id)) = (channel, id.flatpak()) {
+        let body = match action {
+            Install | Update => FLATPAK_INSTALL,
+            Uninstall => FLATPAK_UNINSTALL,
+        };
+        return vec![flatpak_step(id, app_id, body)];
+    }
     match (id, channel, action) {
         // vinoWhisper: install.sh runs vinowhisper-setup on a first install.
         (Id::App(App::Whisper), Release, Install) => vec![s("release_run install.sh --gui --yes")],
@@ -757,23 +812,17 @@ rm -f "$BIN/vinopilot" "$BIN/vinopilot-gui" "$BIN/vinopilot-upgrade"
         // vinoPilot's packages: the release's file for that package manager,
         // checked, then installed over the old one.
         (Id::App(App::Pilot), Deb, Install | Update) => {
-            vec![s(&format!("{PILOT_PACKAGE}{PILOT_DEB}"))]
+            vec![s(&format!("{PACKAGE}{PILOT_DEB}"))]
         }
-        (Id::App(App::Pilot), Deb, Uninstall) => vec![s(&format!(
-            "{PILOT_PACKAGE}as_root apt-get remove -y vinopilot"
-        ))],
+        (Id::App(App::Pilot), Deb, Uninstall) => {
+            vec![s(&format!("{PACKAGE}as_root apt-get remove -y vinopilot"))]
+        }
         (Id::App(App::Pilot), Rpm, Install | Update) => {
-            vec![s(&format!("{PILOT_PACKAGE}{PILOT_RPM}"))]
+            vec![s(&format!("{PACKAGE}{PILOT_RPM}"))]
         }
         (Id::App(App::Pilot), Rpm, Uninstall) => {
-            vec![s(&format!("{PILOT_PACKAGE}{PILOT_RPM_UNINSTALL}"))]
+            vec![s(&format!("{PACKAGE}{PILOT_RPM_UNINSTALL}"))]
         }
-        (Id::App(App::Pilot), Flatpak, Install | Update) => {
-            vec![s(&format!("{PILOT_PACKAGE}{PILOT_FLATPAK}"))]
-        }
-        (Id::App(App::Pilot), Flatpak, Uninstall) => vec![s(&format!(
-            "{PILOT_PACKAGE}flatpak uninstall \"$(flatpak_scope)\" -y {PILOT_APP_ID}"
-        ))],
 
         // vinoUserInterface: a library, so "installed" means a checkout that builds.
         (Id::Ui, Source, Install | Update) => vec![s(
@@ -917,11 +966,146 @@ mod tests {
                 assert!(steps.iter().all(|s| !s.root), "{channel:?} {action:?}");
             }
             let update = &steps(Id::App(App::Pilot), channel, Action::Update)[0].script;
-            assert!(update.contains(&format!("fetch {asset}")), "{channel:?}");
+            assert!(
+                update.contains(&format!("fetch {asset}"))
+                    || update.contains(&format!("ASSET={asset}\nneed flatpak")),
+                "{channel:?}"
+            );
             assert!(update.contains("sha256sum -c"), "{channel:?}");
             // No other component has them.
             assert!(steps(Id::Ovfetch, channel, Action::Update).is_empty());
         }
+    }
+
+    #[test]
+    fn vinowhisper_and_vinosearch_also_install_from_their_flatpak() {
+        for id in Id::ALL {
+            let offered = id.channels().contains(&Channel::Flatpak);
+            let has = matches!(id, Id::App(App::Whisper | App::Search));
+            assert_eq!(offered, has, "{}", id.name());
+            // The default way in stays the first.
+            assert_ne!(id.channels()[0], Channel::Flatpak);
+            if !has {
+                continue;
+            }
+            let app_id = id.flatpak().unwrap();
+            assert_eq!(app_id, format!("io.github.karanshukla.{}", id.slug()));
+            for action in ACTIONS {
+                let steps = steps(id, Channel::Flatpak, action);
+                assert_eq!(steps.len(), 1, "{} {action:?}", id.name());
+                let script = &steps[0].script;
+                assert!(script.contains(&format!("APP_ID={app_id}\n")));
+                // Never the home's uninstaller: that isn't how it got here.
+                assert!(!script.contains("-upgrade"), "{} {action:?}", id.name());
+                assert_eq!(
+                    script.contains("flatpak uninstall"),
+                    action == Action::Uninstall
+                );
+            }
+            let note = uninstall_note(id, Channel::Flatpak);
+            assert!(note.contains(&format!("~/.var/app/{app_id}")), "{note}");
+        }
+    }
+
+    /// Runs `id`'s Flatpak install against a `file://` release holding
+    /// `sums` as the checksum file `sums_name`, with `flatpak` stubbed to
+    /// write its arguments down. What it was run with, or the step's stderr.
+    fn install_flatpak(id: Id, sums_name: &str, good: bool) -> Result<String, String> {
+        use std::fs;
+        let asset = format!("{}-x86_64.flatpak", id.slug());
+        let root = std::env::temp_dir().join(format!(
+            "vinopilot-flatpak-step-{}-{sums_name}-{good}-{}",
+            id.slug(),
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let (release, stubs, home) = (root.join("release"), root.join("stubs"), root.join("home"));
+        for dir in [&release, &stubs, &home] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(release.join(&asset), "a bundle").unwrap();
+        let sum = std::process::Command::new("sha256sum")
+            .arg(release.join(&asset))
+            .output()
+            .unwrap();
+        let hash = String::from_utf8_lossy(&sum.stdout)[..64].to_string();
+        let hash = if good { hash } else { "0".repeat(64) };
+        fs::write(release.join(sums_name), format!("{hash}  {asset}\n")).unwrap();
+        // `info` fails: installed nowhere yet.
+        let stub = stubs.join("flatpak");
+        fs::write(
+            &stub,
+            "#!/bin/sh\n[ \"$1\" != info ] || exit 1\necho \"$@\" >> \"$HOME/ran\"\n",
+        )
+        .unwrap();
+        make_executable(&stub);
+        let step = &steps(id, Channel::Flatpak, Action::Install)[0];
+        let out = std::process::Command::new("bash")
+            .args(["-c", &step.script])
+            .env_clear()
+            .env("HOME", &home)
+            .env("RELEASE", format!("file://{}", release.display()))
+            .env("PATH", format!("{}:/usr/bin:/bin", stubs.display()))
+            .output()
+            .unwrap();
+        let ran = fs::read_to_string(home.join("ran")).unwrap_or_default();
+        fs::remove_dir_all(root).unwrap();
+        if out.status.success() {
+            Ok(ran)
+        } else {
+            assert_eq!(ran, "", "flatpak ran after a failed check");
+            Err(String::from_utf8_lossy(&out.stderr).into_owned())
+        }
+    }
+
+    #[test]
+    fn a_flatpak_is_checked_then_installed_for_the_user() {
+        let has = |tool: &str| {
+            std::process::Command::new(tool)
+                .arg("--version")
+                .output()
+                .is_ok()
+        };
+        if !["bash", "curl", "sha256sum"].into_iter().all(has) {
+            return;
+        }
+        // vinoWhisper's release has SHA256SUMS, vinoSearch's a .sha256 per file.
+        for (id, sums) in [
+            (Id::App(App::Whisper), "SHA256SUMS".to_string()),
+            (
+                Id::App(App::Search),
+                "vinosearch-x86_64.flatpak.sha256".to_string(),
+            ),
+        ] {
+            let ran = install_flatpak(id, &sums, true).unwrap();
+            let asset = format!("{}-x86_64.flatpak", id.slug());
+            assert!(ran.starts_with("install --user -y "), "{ran}");
+            assert!(ran.trim_end().ends_with(&asset), "{ran}");
+            let why = install_flatpak(id, &sums, false).unwrap_err();
+            assert!(why.contains("doesn't match its checksum"), "{why}");
+        }
+    }
+
+    #[test]
+    fn a_release_without_the_flatpak_says_so() {
+        let has = |tool: &str| {
+            std::process::Command::new(tool)
+                .arg("--version")
+                .output()
+                .is_ok()
+        };
+        if !["bash", "curl"].into_iter().all(has) {
+            return;
+        }
+        let step = &steps(Id::App(App::Search), Channel::Flatpak, Action::Install)[0];
+        let out = std::process::Command::new("bash")
+            .args(["-c", &step.script])
+            .env("RELEASE", "file:///nowhere/at/all")
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        let why = String::from_utf8_lossy(&out.stderr);
+        assert!(why.contains("✗ "), "{why}");
     }
 
     #[test]

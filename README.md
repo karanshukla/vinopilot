@@ -44,7 +44,7 @@ sudo apt install ./vinopilot-x86_64.deb
 sudo dnf install https://github.com/karanshukla/vinopilot/releases/latest/download/vinopilot-x86_64.rpm
 ```
 
-The Flatpak isn't sandboxed and doesn't install Flatpaks: vinoPilot installs apps on your system with your own `bash`, `git`, `uv`, `cargo` and `pkexec`, so its only permission is the one to run on the host (`org.freedesktop.Flatpak`), and the window and `flatpak run --command=vinopilot io.github.karanshukla.vinopilot` run there. The apps it installs go into your home through their own installers, as with every other way in.
+The Flatpak isn't sandboxed: vinoPilot installs apps on your system with your own `bash`, `git`, `uv`, `cargo`, `flatpak` and `pkexec`, so its only permission is the one to run on the host (`org.freedesktop.Flatpak`), and the window and `flatpak run --command=vinopilot io.github.karanshukla.vinopilot` run there. The apps it installs go into your home through their own installers, as with every other way in, or as their own Flatpaks where they have one.
 
 ### Updating
 
@@ -105,7 +105,7 @@ vinopilot uninstall pop
 vinopilot steps search install    # print the shell an action would run, without running it
 ```
 
-App names work with or without the `vino`. `--via` takes `release` (the default), `source`, `pypi` or `crates`. Exit codes: 0 done, 1 failed, 2 bad usage.
+App names work with or without the `vino`. `--via` takes `release` (the default), `source`, `pypi` or `crates`, and `flatpak` for vinoWhisper and vinoSearch: their release's Flatpak bundle, checked against the release's checksums and installed for your user with `flatpak install --user`. Updating downloads the new release's bundle over it; uninstalling leaves the app's data in `~/.var/app`. Exit codes: 0 done, 1 failed, 2 bad usage.
 
 `--json` turns it into an API: `list` and `check` print one document, and actions print one event per line. It's what a frontend in another language should drive instead of reimplementing the catalog; [docs/json-api.md](docs/json-api.md) has the shape.
 

@@ -37,10 +37,10 @@
 | Field | Meaning |
 |---|---|
 | `id` | what the command line takes: `vinowhisper`, `ovfetch`, `vinouserinterface`, `vinopilot` |
-| `channels` | the ways it can be installed, best first: `release`, `source`, `package` (PyPI or crates.io) |
+| `channels` | the ways it can be installed, best first: `release`, `source`, `package` (PyPI or crates.io), `flatpak` (the release's Flatpak bundle: vinowhisper and vinosearch) |
 | `registry` | `"pypi"` or `"crates.io"` when `channels` has `package`, else `null` |
 | `needs_root` | its actions run through `pkexec` |
-| `installed` | `null`, or how it's installed and its version (`null` when the binary wouldn't say, `"dev"` for a checkout build). `channel` is one of `channels`, or for vinopilot itself also `deb`, `rpm` or `flatpak`: its release's package, which `update` and `uninstall` go through but `install` doesn't offer |
+| `installed` | `null`, or how it's installed and its version (`null` when the binary wouldn't say, `"dev"` for a checkout build). `channel` is one of `channels`, or for vinopilot itself also `deb`, `rpm` or `flatpak`: its release's package, which `update` and `uninstall` go through but `install` doesn't offer. A Flatpak's version is its metainfo's newest release, `null` without one |
 | `checkout` | `null`, or the git checkout in the source folder |
 | `system_package` | `null`, or the distro packages (rpm or deb) that own its commands in `/usr/bin`: `{"kind": "rpm", "packages": ["vinoopeneffects"], "remove": "sudo dnf remove vinoopeneffects"}`. vinopilot doesn't remove these; `remove` is the command for the user to run |
 | `shadowed` | its commands that are in both `~/.local/bin` and `~/.cargo/bin`, say a release install left beside a source build: `[{"command": "vinosearch", "runs": "/home/you/.local/bin/vinosearch", "hidden": "/home/you/.cargo/bin/vinosearch"}]`. `runs` is the one first on `PATH`. Empty when there's one copy |

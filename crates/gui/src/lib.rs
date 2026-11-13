@@ -21,7 +21,11 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Nine cards, three by three; one column when three don't fit.
 const COLUMNS: usize = 3;
-const CARD_MIN: f32 = 260.0;
+/// Wide enough for the four ways in of a card with a Flatpak, on a row of
+/// their own.
+const CARD_MIN: f32 = 290.0;
+/// Narrower inside than this, four ways in go above Install, not beside it.
+const WAYS_BESIDE: f32 = 330.0;
 const CARD_HEIGHT: f32 = 172.0;
 const GAP: f32 = 12.0;
 /// The grid stops growing here, so cards don't stretch across a 4K screen.
@@ -493,6 +497,9 @@ impl Pilot {
             ctx.request_repaint_after(std::time::Duration::from_secs_f64(COPIED_FOR));
         }
         let mut copy_clicked = false;
+        let options: Vec<(Channel, &str)> = channels.iter().map(|c| (*c, c.label(id))).collect();
+        let ways_above = channels.len() > 3 && width - 2.0 * margin - 2.0 < WAYS_BESIDE;
+        let install_from = format!("Install {} from", id.name());
 
         egui::Frame::new()
             .fill(if confirming { p.error_tint } else { p.surface })
@@ -566,15 +573,8 @@ impl Pilot {
                                 if ui.add(Button::primary("Install").small()).clicked() {
                                     intent = Some((*choice, Action::Install));
                                 }
-                                if channels.len() > 1 {
-                                    let options: Vec<(Channel, &str)> =
-                                        channels.iter().map(|c| (*c, c.label(id))).collect();
-                                    widgets::segmented(
-                                        ui,
-                                        &format!("Install {} from", id.name()),
-                                        choice,
-                                        &options,
-                                    );
+                                if channels.len() > 1 && !ways_above {
+                                    widgets::segmented(ui, &install_from, choice, &options);
                                 }
                             }
                             Some(installed) if confirming => {
@@ -609,6 +609,10 @@ impl Pilot {
                                 }
                             }
                         });
+                        // Bottom-up: this lands above the row just drawn.
+                        if local.installed.is_none() && ways_above {
+                            widgets::segmented(ui, &install_from, choice, &options);
+                        }
                     });
                 });
             });

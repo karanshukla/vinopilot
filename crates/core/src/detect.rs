@@ -358,36 +358,70 @@ fn shadowed(paths: &Paths, id: Id, path: &std::ffi::OsStr) -> Vec<Shadowed> {
         .collect()
 }
 
-/// vinoPilot's `vinopilot` in its Flatpak, the user's installation before
-/// the system's: `<installation>/app/<id>/current/active/files/libexec/...`,
-/// where packaging/flatpak puts the real binaries.
-fn flatpak_command(paths: &Paths) -> Option<PathBuf> {
+/// `inside` the files of `app_id`'s Flatpak, the user's installation before
+/// the system's: `<installation>/app/<id>/current/active/files/...`.
+fn flatpak_file(paths: &Paths, app_id: &str, inside: &str) -> Option<PathBuf> {
     let inside = Path::new("app")
-        .join(crate::catalog::PILOT_APP_ID)
-        .join("current/active/files/libexec/vinopilot/vinopilot");
+        .join(app_id)
+        .join("current/active/files")
+        .join(inside);
     first(&[
         paths.home.join(".local/share/flatpak").join(&inside),
         paths.system_flatpak.join(&inside),
     ])
 }
 
+/// The newest `<release version="...">` of a metainfo file, which lists
+/// them newest first.
+pub fn metainfo_version(text: &str) -> Option<String> {
+    let tag = text.split("<release ").nth(1)?.split('>').next()?;
+    let value = tag.split("version=").nth(1)?;
+    let quote = value.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+    let version = value[1..].split(quote).next()?;
+    let plain = !version.is_empty()
+        && version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '+');
+    plain.then(|| version.to_string())
+}
+
+/// `id` installed as its release's Flatpak. vinoPilot's holds the real
+/// binaries (packaging/flatpak), which say their version; an app's runs only
+/// in its sandbox, so its version is its metainfo's newest release.
+fn flatpak(paths: &Paths, id: Id) -> Option<Installed> {
+    let app_id = id.flatpak()?;
+    let version = if id == Id::App(App::Pilot) {
+        ask_version(&flatpak_file(paths, app_id, "libexec/vinopilot/vinopilot")?)
+    } else {
+        flatpak_file(paths, app_id, "")?;
+        flatpak_file(
+            paths,
+            app_id,
+            &format!("share/metainfo/{app_id}.metainfo.xml"),
+        )
+        .and_then(|file| std::fs::read_to_string(file).ok())
+        .and_then(|text| metainfo_version(&text))
+    };
+    Some(Installed {
+        channel: Channel::Flatpak,
+        version,
+    })
+}
+
 /// vinoPilot installed as one of its release's packages: the `.deb` or
 /// `.rpm` that owns `/usr/bin/vinopilot`, else its Flatpak.
 fn packaged(paths: &Paths, system: Option<&SystemPackage>) -> Option<Installed> {
-    let (channel, bin) = match system {
-        Some(system) => {
-            let channel = if system.kind == "rpm" {
-                Channel::Rpm
-            } else {
-                Channel::Deb
-            };
-            (channel, paths.system_bin.join("vinopilot"))
-        }
-        None => (Channel::Flatpak, flatpak_command(paths)?),
+    let Some(system) = system else {
+        return flatpak(paths, Id::App(App::Pilot));
+    };
+    let channel = if system.kind == "rpm" {
+        Channel::Rpm
+    } else {
+        Channel::Deb
     };
     Some(Installed {
         channel,
-        version: ask_version(&bin),
+        version: ask_version(&paths.system_bin.join("vinopilot")),
     })
 }
 
@@ -556,9 +590,11 @@ fn local(
         installed
     };
     let system_package = system_package(paths, id);
-    // A copy in the home runs first; without one, vinoPilot is its package.
+    // A copy in the home runs first; without one, vinoPilot is its package,
+    // and an app its Flatpak.
     let installed = match installed {
         None if id == Id::App(App::Pilot) => packaged(paths, system_package.as_ref()),
+        None => flatpak(paths, id),
         installed => installed,
     };
     Local {
@@ -768,6 +804,62 @@ mod tests {
         std::fs::write(home.join(".local/bin/vinopilot"), "").unwrap();
         assert_eq!(found(&paths).map(|i| i.channel), Some(Channel::Source));
         std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn an_app_is_found_in_its_flatpak_with_its_metainfos_version() {
+        let home =
+            std::env::temp_dir().join(format!("vinopilot-appflatpak-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let paths = Paths {
+            home: home.clone(),
+            source_root: home.join("src"),
+            system_bin: home.join("usr/bin"),
+            system_flatpak: home.join("var/lib/flatpak"),
+        };
+        let id = Id::App(App::Search);
+        let found =
+            |paths: &Paths| local(paths, id, &HashMap::new(), &HashMap::new(), None).installed;
+        let files = paths
+            .system_flatpak
+            .join("app/io.github.karanshukla.vinosearch/current/active/files");
+        std::fs::create_dir_all(files.join("share/metainfo")).unwrap();
+        // No metainfo: installed, version unknown.
+        assert_eq!(
+            found(&paths),
+            Some(Installed {
+                channel: Channel::Flatpak,
+                version: None
+            })
+        );
+        std::fs::write(
+            files.join("share/metainfo/io.github.karanshukla.vinosearch.metainfo.xml"),
+            "<component>\n<releases>\n<release version=\"9.1.0\" date=\"2026-11-20\"/>\n\
+             <release version=\"9.0.0\" date=\"2026-11-01\"/>\n</releases>\n</component>\n",
+        )
+        .unwrap();
+        assert_eq!(
+            found(&paths),
+            Some(Installed {
+                channel: Channel::Flatpak,
+                version: Some("9.1.0".into())
+            })
+        );
+        // The home's install is the one on PATH.
+        std::fs::create_dir_all(home.join(".local/bin")).unwrap();
+        std::fs::write(home.join(".local/bin/vinosearch"), "").unwrap();
+        assert_eq!(found(&paths).map(|i| i.channel), Some(Channel::Source));
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn metainfo_versions() {
+        assert_eq!(
+            metainfo_version("<release date='2026-01-01' version='1.2.3'>").as_deref(),
+            Some("1.2.3")
+        );
+        assert_eq!(metainfo_version("<releases></releases>"), None);
+        assert_eq!(metainfo_version("<release version=\"<b>\"/>"), None);
     }
 
     #[test]
